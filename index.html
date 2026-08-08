@@ -8,6 +8,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg: #F4F7FA;
@@ -164,8 +165,9 @@
   .fab-btn:hover{ transform:translateY(-1px); box-shadow:0 8px 24px rgba(0,0,0,0.15); }
   .fab-btn.primary{ background:var(--brand); color:var(--brand-contrast); border-color:var(--brand); }
   .fab-btn.warn{ background:var(--panel); color:var(--c-live); border-color:#f3c9c7; }
-  .admin-banner{ position:fixed; top:0; left:0; right:0; z-index:39; background:var(--brand); color:var(--brand-contrast); text-align:center; font-family:'JetBrains Mono'; font-size:11.5px; letter-spacing:0.08em; padding:7px 10px calc(7px + env(safe-area-inset-top)); padding-top:calc(7px + env(safe-area-inset-top)); display:none; }
+  .admin-banner{ position:static; z-index:39; background:var(--brand); color:var(--brand-contrast); text-align:center; font-family:'JetBrains Mono'; font-size:11.5px; letter-spacing:0.08em; padding:7px 10px; display:none; }
   .admin-banner.show{ display:block; }
+  #bannerStack{ padding-top:env(safe-area-inset-top); }
 
   /* ---------- BUTTONS ---------- */
   .btn{ font-family:'Inter'; font-weight:600; font-size:14px; padding:10px 18px; border-radius:9px; border:none; cursor:pointer; background:var(--brand); color:var(--brand-contrast); transition:all .15s ease; }
@@ -271,7 +273,10 @@
 </head>
 <body>
 
-<div class="admin-banner" id="adminBanner">MODO ADMINISTRADOR ATIVO — as trocas na escala são salvas automaticamente</div>
+<div id="bannerStack" style="position:fixed; top:0; left:0; right:0; z-index:39;">
+  <div class="admin-banner" id="adminBanner">MODO ADMINISTRADOR ATIVO — as trocas na escala são salvas automaticamente</div>
+  <div class="admin-banner" id="configBanner" style="background:#B5462A;">⚠️ Supabase não configurado ainda — preencha SUPABASE_URL e SUPABASE_ANON_KEY no topo do código. Por enquanto os dados estão salvos só neste navegador.</div>
+</div>
 
 <div class="wrap">
 
@@ -454,6 +459,77 @@
 <div class="toast" id="toast"></div>
 
 <script>
+/* ╔══════════════════════════════════════════════════════════════════╗
+   ║  CONFIGURAÇÃO DO SUPABASE — cole seus dados aqui embaixo           ║
+   ║                                                                     ║
+   ║  1. Crie um projeto gratuito em https://supabase.com               ║
+   ║  2. Vá em Project Settings → API                                   ║
+   ║  3. Copie a "Project URL" e a chave "anon public"                  ║
+   ║  4. Cole as duas nas variáveis abaixo, entre as aspas               ║
+   ║  5. Crie a tabela "app_state" (veja o SQL que te passei junto)     ║
+   ╚══════════════════════════════════════════════════════════════════╝ */
+    const SUPABASE_URL = https://hkkaczduyyglyrckiwib.supabase.co/rest/v1/;
+    const SUPABASE_ANON_KEY = sb_publishable_Stg1IG3MlOl2WICVLBo1dg_gwCMSupI;
+/* ══════════════════════════════════════════════════════════════════ */
+
+const SUPABASE_CONFIGURED = SUPABASE_URL.startsWith('https://') && !SUPABASE_URL.includes('COLE_')
+  && SUPABASE_ANON_KEY.length > 20 && !SUPABASE_ANON_KEY.includes('COLE_');
+
+let sb = null;
+if(SUPABASE_CONFIGURED){
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+/* ---------- Camada de armazenamento -----------
+   Se o Supabase estiver configurado, os dados são lidos/gravados na
+   tabela "app_state" (compartilhada com todo mundo que abrir o site).
+   Se ainda não estiver configurado, cai para localStorage só para não
+   travar o app durante testes — mas aí os dados ficam só neste navegador. */
+async function dbGet(key){
+  if(sb){
+    try{
+      const { data, error } = await sb.from('app_state').select('value').eq('key', key).maybeSingle();
+      if(error) throw error;
+      return data ? data.value : null;
+    }catch(e){ console.error('Supabase GET falhou para', key, e); return null; }
+  }
+  try{
+    const raw = localStorage.getItem('ipbjn_local_' + key);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+async function dbSet(key, value){
+  if(sb){
+    try{
+      const { error } = await sb.from('app_state').upsert({ key, value, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }catch(e){ console.error('Supabase SET falhou para', key, e); showToast('Erro ao salvar no Supabase — veja o console'); }
+    return;
+  }
+  try{ localStorage.setItem('ipbjn_local_' + key, JSON.stringify(value)); }catch(e){}
+}
+function showConfigBanner(){
+  const banner = document.getElementById('configBanner');
+  if(SUPABASE_CONFIGURED){ banner.classList.remove('show'); return; }
+  banner.classList.add('show');
+}
+function subscribeRealtime(){
+  if(!sb) return;
+  try{
+    sb.channel('app_state_changes')
+      .on('postgres_changes', { event:'*', schema:'public', table:'app_state' }, (payload)=>{
+        const row = payload.new;
+        if(!row || !row.key) return;
+        if(row.key === 'people'){ people = row.value; buildRoster(); }
+        else if(row.key === 'schedule'){ schedule = row.value; }
+        else if(row.key === 'settings'){ settings = row.value; applySettings(); }
+        else return;
+        render();
+      })
+      .subscribe();
+  }catch(e){ console.error('Realtime indisponível', e); }
+}
+
 /* =========================== CONSTANTS =========================== */
 const ROLES = ['SOM','DATASHOW','LIVE','FOTOGRAFIA'];
 const ROLE_COLOR = { SOM:'var(--c-som)', DATASHOW:'var(--c-datashow)', LIVE:'var(--c-live)', FOTOGRAFIA:'var(--c-foto)' };
@@ -498,11 +574,8 @@ let pendingLogoDataUrl = null;
 
 /* =========================== SETTINGS (logo / nomes) =========================== */
 async function loadSettings(){
-  try{
-    const r = await window.storage.get('ipbjn_media_settings', true);
-    const saved = JSON.parse(r.value);
-    settings = { ...settings, ...saved };
-  }catch(e){ /* usa padrão */ }
+  const saved = await dbGet('settings');
+  if(saved) settings = { ...settings, ...saved };
   applySettings();
 }
 function applySettings(){
@@ -537,34 +610,33 @@ document.getElementById('btnSaveSettings').addEventListener('click', async ()=>{
   settings.scheduleName = document.getElementById('setScheduleName').value.trim() || 'Escala de Serviço';
   if(pendingLogoDataUrl === 'RESET') settings.logo = null;
   else if(pendingLogoDataUrl) settings.logo = pendingLogoDataUrl;
-  try{ await window.storage.set('ipbjn_media_settings', JSON.stringify(settings), true); }catch(e){ console.error('save settings failed', e); }
+  await dbSet('settings', settings);
   pendingLogoDataUrl = null;
   applySettings();
   showToast('Configurações salvas');
 });
 
-/* =========================== THEME =========================== */
-async function loadTheme(){
+/* =========================== THEME (só neste navegador) =========================== */
+function loadTheme(){
   let theme = 'light';
-  try{ const r = await window.storage.get('ipbjn_theme', false); if(r && r.value) theme = r.value; }catch(e){}
+  try{ theme = localStorage.getItem('ipbjn_theme') || 'light'; }catch(e){}
   applyTheme(theme);
 }
 function applyTheme(theme){
   document.documentElement.setAttribute('data-theme', theme);
   document.getElementById('themeToggle').textContent = theme === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
 }
-document.getElementById('themeToggle').addEventListener('click', async ()=>{
+document.getElementById('themeToggle').addEventListener('click', ()=>{
   const current = document.documentElement.getAttribute('data-theme');
   const next = current === 'dark' ? 'light' : 'dark';
   applyTheme(next);
-  try{ await window.storage.set('ipbjn_theme', next, false); }catch(e){}
+  try{ localStorage.setItem('ipbjn_theme', next); }catch(e){}
 });
 
-/* =========================== STORAGE =========================== */
+/* =========================== DADOS PRINCIPAIS (Supabase) =========================== */
 async function loadAll(){
-  let loadedPeople = null, loadedSchedule = null;
-  try{ const r = await window.storage.get('ipbjn_media_people', true); loadedPeople = JSON.parse(r.value); }catch(e){ loadedPeople = null; }
-  try{ const r = await window.storage.get('ipbjn_media_schedule', true); loadedSchedule = JSON.parse(r.value); }catch(e){ loadedSchedule = null; }
+  const loadedPeople = await dbGet('people');
+  const loadedSchedule = await dbGet('schedule');
 
   people = loadedPeople || JSON.parse(JSON.stringify(DEFAULT_PEOPLE));
   schedule = loadedSchedule || [];
@@ -577,8 +649,8 @@ async function loadAll(){
   }
 }
 async function saveAll(){
-  try{ await window.storage.set('ipbjn_media_people', JSON.stringify(people), true); }catch(e){ console.error('save people failed', e); }
-  try{ await window.storage.set('ipbjn_media_schedule', JSON.stringify(schedule), true); }catch(e){ console.error('save schedule failed', e); }
+  await dbSet('people', people);
+  await dbSet('schedule', schedule);
 }
 
 /* =========================== GENERATION ENGINE =========================== */
@@ -1302,14 +1374,16 @@ document.getElementById('btnExportPrint').addEventListener('click', ()=>{
 
 /* =========================== INIT =========================== */
 async function init(){
+  showConfigBanner();
   document.getElementById('loadingState').classList.add('show');
-  await loadTheme();
+  loadTheme();
   await loadSettings();
   await loadAll();
   document.getElementById('loadingState').classList.remove('show');
   buildRoster();
   renderFab();
   render();
+  subscribeRealtime();
 }
 init();
 </script>
